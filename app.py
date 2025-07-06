@@ -727,9 +727,19 @@ def render_logs():
 def main():
     """Main application function"""
     
-    # Initialize session manager
-    session_manager = get_session_manager()
-    session_manager.restore_session_state()
+    try:
+        # Initialize session manager
+        session_manager = get_session_manager()
+        
+        # Safely restore session state
+        if hasattr(session_manager, 'restore_session_state'):
+            session_manager.restore_session_state()
+        
+    except Exception as e:
+        st.error(f"⚠️ Session initialization warning: {e}")
+        # Continue with fresh session
+        st.session_state.session_manager = None
+        session_manager = get_session_manager()
     
     # Sidebar
     with st.sidebar:
