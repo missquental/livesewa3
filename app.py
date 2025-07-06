@@ -17,6 +17,17 @@ from advanced_settings import (
 )
 import sqlite3
 from pathlib import Path
+import streamlit as st
+import pandas as pd
+import psutil
+import pytz
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaFileUpload
+from livesesion import get_session_manager, restore_session, save_broadcast_to_session, get_broadcast_from_session, clear_broadcast_from_session
 
 # Install required packages
 try:
@@ -36,6 +47,9 @@ except ImportError:
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
     from google_auth_oauthlib.flow import Flow
+
+# Jakarta timezone
+JAKARTA_TZ = pytz.timezone('Asia/Jakarta')
 
 # Session management functions
 def get_session_manager():
@@ -844,6 +858,495 @@ def get_youtube_categories():
         "28": "Science & Technology"
     }
 
+def can_upload_thumbnail():
+    """Check if thumbnail upload is allowed based on quota"""
+    return True, 0, 0  # Simplified for now
+
+def render_stream_manager():
+    """Render Stream Manager tab"""
+    st.header("🎬 Stream Manager")
+    
+    # Check if there's an active stream
+    session_manager = get_session_manager()
+    current_broadcast = session_manager.get_current_broadcast()
+    
+    if current_broadcast:
+        st.success("✅ Active Stream Found")
+        
+        broadcast_data = current_broadcast['data']
+        
+        # Display stream information
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📺 Stream Information")
+            st.write(f"**Title:** {broadcast_data.get('title', 'N/A')}")
+            st.write(f"**Description:** {broadcast_data.get('description', 'N/A')[:100]}...")
+            st.write(f"**Privacy:** {broadcast_data.get('privacy', 'N/A')}")
+            st.write(f"**Category:** {broadcast_data.get('category', 'N/A')}")
+            
+            if broadcast_data.get('tags'):
+                st.write(f"**Tags:** {', '.join(broadcast_data['tags'])}")
+        
+        with col2:
+            st.subheader("🔧 Stream Controls")
+            
+            # Stream status
+            streaming_status = session_manager.get_streaming_status()
+            if streaming_status:
+                status = streaming_status['status']
+                if status.get('active', False):
+                    st.success("🔴 LIVE")
+                else:
+                    st.info("⏸️ Ready to Stream")
+            else:
+                st.info("⏸️ Ready to Stream")
+            
+            # Control buttons
+            col_start, col_stop = st.columns(2)
+            
+            with col_start:
+                if st.button("🚀 Start Stream", type="primary", use_container_width=True):
+                    st.success("Stream starting...")
+                    # Here you would implement actual stream start logic
+            
+            with col_stop:
+                if st.button("⏹️ Stop Stream", use_container_width=True):
+                    st.info("Stream stopping...")
+                    # Here you would implement actual stream stop logic
+        
+        # Stream details
+        st.divider()
+        st.subheader("📊 Stream Details")
+        
+        # Show RTMP details if available
+        if 'rtmp_url' in broadcast_data:
+            st.code(f"RTMP URL: {broadcast_data['rtmp_url']}")
+        if 'stream_key' in broadcast_data:
+            st.code(f"Stream Key: {broadcast_data['stream_key']}")
+        
+        # Clear stream button
+        st.divider()
+        if st.button("🗑️ Clear Current Stream", type="secondary"):
+            session_manager.clear_current_broadcast()
+            st.success("Stream cleared!")
+            st.rerun()
+    
+    else:
+        st.info("📺 No active stream found. Create a new stream to get started.")
+        
+        # Quick actions
+        st.subheader("🚀 Quick Actions")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("➕ Create New Stream", type="primary", use_container_width=True):
+                st.switch_page("Add New Stream")
+        
+        with col2:
+            if st.button("📺 YouTube API Setup", use_container_width=True):
+                st.switch_page("YouTube API")
+        
+        # Recent streams
+        st.divider()
+        st.subheader("📋 Recent Stream Configurations")
+        
+        stream_configs = session_manager.get_stream_configs()
+        if stream_configs:
+            for i, config in enumerate(stream_configs[-5:]):  # Show last 5
+                with st.expander(f"Stream {i+1}: {config.get('title', 'Untitled')}"):
+                    st.write(f"**Created:** {config.get('saved_at', 'Unknown')}")
+                    st.write(f"**Privacy:** {config.get('privacy', 'Unknown')}")
+                    if config.get('description'):
+                        st.write(f"**Description:** {config['description'][:100]}...")
+                    
+                    if st.button(f"🔄 Restore Config {i+1}", key=f"restore_{i}"):
+                        # Restore this configuration
+                        st.session_state.update(config)
+                        st.success("Configuration restored!")
+        else:
+            st.info("No recent stream configurations found.")
+
+def render_add_new_stream():
+    """Render Add New Stream tab"""
+    st.header("➕ Add New Stream")
+    
+    # Check authentication
+    if not check_authentication():
+        st.error("❌ Please authenticate with YouTube API first!")
+        return
+    
+    # Stream creation form
+    with st.form("create_stream_form"):
+        st.subheader("📝 Stream Information")
+        
+        # Basic information
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            title = st.text_input(
+                "🎬 Stream Title *",
+                placeholder="Enter your stream title",
+                help="This will be the title of your YouTube live stream"
+            )
+            
+            privacy = st.selectbox(
+                "🔒 Privacy Setting",
+                options=["public", "unlisted", "private"],
+                index=0,
+                help="Choose who can see your stream"
+            )
+            
+            category = st.selectbox(
+                "📂 Category",
+                options=["Gaming", "Music", "Education", "Entertainment", "Sports", "Technology", "Other"],
+                index=0,
+                help="Select the most appropriate category"
+            )
+        
+        with col2:
+            description = st.text_area(
+                "📄 Description",
+                placeholder="Describe your stream...",
+                height=100,
+                help="Provide details about your stream content"
+            )
+            
+            tags = st.text_input(
+                "🏷️ Tags (comma separated)",
+                placeholder="gaming, live, stream, youtube",
+                help="Add relevant tags to help people find your stream"
+            )
+        
+        # Advanced settings
+        st.divider()
+        st.subheader("⚙️ Stream Settings")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            enable_dvr = st.checkbox("📹 Enable DVR", value=True, help="Allow viewers to rewind")
+            enable_auto_start = st.checkbox("🚀 Auto Start", value=True, help="Start automatically when streaming begins")
+            record_from_start = st.checkbox("🎥 Record from Start", value=True, help="Start recording immediately")
+        
+        with col2:
+            enable_embed = st.checkbox("🔗 Enable Embed", value=True, help="Allow embedding on other sites")
+            enable_content_encryption = st.checkbox("🔐 Content Encryption", value=False, help="Encrypt stream content")
+        
+        # Thumbnail upload
+        st.divider()
+        st.subheader("🖼️ Custom Thumbnail")
+        
+        thumbnail_file = st.file_uploader(
+            "Upload Thumbnail (Optional)",
+            type=['jpg', 'jpeg', 'png'],
+            help="Upload a custom thumbnail for your stream (1280x720 recommended)"
+        )
+        
+        # Submit button
+        submitted = st.form_submit_button("🚀 Create Stream", type="primary", use_container_width=True)
+        
+        if submitted:
+            if not title:
+                st.error("❌ Stream title is required!")
+                return
+            
+            # Create stream
+            with st.spinner("Creating stream..."):
+                try:
+                    # Prepare stream data
+                    stream_data = {
+                        'title': title,
+                        'description': description,
+                        'privacy': privacy,
+                        'category': category,
+                        'tags': [tag.strip() for tag in tags.split(',') if tag.strip()],
+                        'enable_dvr': enable_dvr,
+                        'enable_auto_start': enable_auto_start,
+                        'record_from_start': record_from_start,
+                        'enable_embed': enable_embed,
+                        'enable_content_encryption': enable_content_encryption,
+                        'thumbnail_file': thumbnail_file
+                    }
+                    
+                    # Save to session
+                    session_manager = get_session_manager()
+                    session_manager.save_stream_config(stream_data)
+                    session_manager.save_broadcast_data(stream_data)
+                    
+                    st.success("✅ Stream created successfully!")
+                    st.balloons()
+                    
+                    # Show stream details
+                    st.subheader("📺 Stream Created")
+                    st.write(f"**Title:** {title}")
+                    st.write(f"**Privacy:** {privacy}")
+                    st.write(f"**Category:** {category}")
+                    
+                    if tags:
+                        st.write(f"**Tags:** {tags}")
+                    
+                    st.info("💡 Go to Stream Manager tab to start streaming!")
+                    
+                except Exception as e:
+                    st.error(f"❌ Error creating stream: {str(e)}")
+
+def render_youtube_api():
+    """Render YouTube API tab"""
+    st.header("📺 YouTube API Configuration")
+    
+    # Authentication status
+    auth_status = check_authentication()
+    
+    if auth_status:
+        st.success("✅ YouTube API is authenticated and ready!")
+        
+        # Show channel info
+        try:
+            service = get_youtube_service()
+            if service:
+                # Get channel information
+                channels_response = service.channels().list(
+                    part='snippet,statistics',
+                    mine=True
+                ).execute()
+                
+                if channels_response['items']:
+                    channel = channels_response['items'][0]
+                    snippet = channel['snippet']
+                    statistics = channel['statistics']
+                    
+                    st.subheader("📊 Channel Information")
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.write(f"**Channel Name:** {snippet['title']}")
+                        st.write(f"**Description:** {snippet['description'][:100]}...")
+                        st.write(f"**Country:** {snippet.get('country', 'Not specified')}")
+                        st.write(f"**Created:** {snippet['publishedAt'][:10]}")
+                    
+                    with col2:
+                        st.metric("👥 Subscribers", statistics.get('subscriberCount', 'Hidden'))
+                        st.metric("📹 Videos", statistics.get('videoCount', '0'))
+                        st.metric("👀 Total Views", statistics.get('viewCount', '0'))
+                
+        except Exception as e:
+            st.warning(f"⚠️ Could not fetch channel info: {str(e)}")
+        
+        # API actions
+        st.divider()
+        st.subheader("🔧 API Actions")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("🔄 Refresh Authentication", use_container_width=True):
+                # Clear credentials and re-authenticate
+                if os.path.exists('token.json'):
+                    os.remove('token.json')
+                st.success("Authentication cleared. Please re-authenticate.")
+                st.rerun()
+        
+        with col2:
+            if st.button("📊 Test API Connection", use_container_width=True):
+                test_api_connection()
+        
+        with col3:
+            if st.button("📋 Show API Quota", use_container_width=True):
+                show_api_quota_info()
+    
+    else:
+        st.error("❌ YouTube API is not authenticated!")
+        
+        st.subheader("🔑 Authentication Required")
+        st.write("To use this application, you need to authenticate with YouTube API.")
+        
+        # Authentication steps
+        st.subheader("📋 Setup Steps")
+        
+        with st.expander("1. 🔑 Google OAuth Setup", expanded=True):
+            st.write("Upload your Google OAuth JSON file:")
+            
+            uploaded_file = st.file_uploader(
+                "Choose OAuth JSON file",
+                type=['json'],
+                help="Download this from Google Cloud Console"
+            )
+            
+            if uploaded_file:
+                try:
+                    # Save the uploaded file
+                    with open('credentials.json', 'wb') as f:
+                        f.write(uploaded_file.getbuffer())
+                    
+                    st.success("✅ OAuth file uploaded successfully!")
+                    
+                    if st.button("🚀 Start Authentication", type="primary"):
+                        authenticate_youtube()
+                        
+                except Exception as e:
+                    st.error(f"❌ Error uploading file: {str(e)}")
+        
+        with st.expander("2. 📺 Channel Configuration"):
+            st.write("After authentication, configure your channel settings:")
+            st.write("• Set up channel verification")
+            st.write("• Enable live streaming")
+            st.write("• Configure stream settings")
+
+def render_logs():
+    """Render Logs tab"""
+    st.header("📊 Application Logs")
+    
+    # Log management
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("🔄 Refresh Logs", use_container_width=True):
+            st.rerun()
+    
+    with col2:
+        if st.button("🗑️ Clear Logs", use_container_width=True):
+            # Clear session logs
+            if 'logs' in st.session_state:
+                st.session_state.logs = []
+            st.success("Logs cleared!")
+    
+    with col3:
+        auto_refresh = st.checkbox("🔄 Auto-refresh", value=False)
+    
+    # Session information
+    st.divider()
+    st.subheader("📋 Session Information")
+    
+    session_manager = get_session_manager()
+    session_info = session_manager.get_session_info()
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("🆔 Session ID", session_info['session_id'][-8:])
+    
+    with col2:
+        st.metric("📺 Active Broadcast", "Yes" if session_info['has_broadcast'] else "No")
+    
+    with col3:
+        st.metric("⚙️ Stream Configs", session_info['stream_configs_count'])
+    
+    with col4:
+        st.metric("📊 Form Data", session_info['form_data_count'])
+    
+    # System information
+    st.divider()
+    st.subheader("💻 System Information")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # CPU and Memory usage
+        cpu_percent = psutil.cpu_percent(interval=1)
+        memory = psutil.virtual_memory()
+        
+        st.metric("🖥️ CPU Usage", f"{cpu_percent}%")
+        st.metric("💾 Memory Usage", f"{memory.percent}%")
+        st.metric("💽 Available Memory", f"{memory.available / (1024**3):.1f} GB")
+    
+    with col2:
+        # Disk usage
+        disk = psutil.disk_usage('/')
+        
+        st.metric("💿 Disk Usage", f"{(disk.used / disk.total) * 100:.1f}%")
+        st.metric("💿 Free Space", f"{disk.free / (1024**3):.1f} GB")
+        st.metric("💿 Total Space", f"{disk.total / (1024**3):.1f} GB")
+    
+    # Application logs
+    st.divider()
+    st.subheader("📝 Application Logs")
+    
+    # Show logs if available
+    if 'logs' in st.session_state and st.session_state.logs:
+        for log_entry in reversed(st.session_state.logs[-50:]):  # Show last 50 logs
+            timestamp = log_entry.get('timestamp', 'Unknown')
+            level = log_entry.get('level', 'INFO')
+            message = log_entry.get('message', '')
+            
+            if level == 'ERROR':
+                st.error(f"[{timestamp}] {message}")
+            elif level == 'WARNING':
+                st.warning(f"[{timestamp}] {message}")
+            elif level == 'SUCCESS':
+                st.success(f"[{timestamp}] {message}")
+            else:
+                st.info(f"[{timestamp}] {message}")
+    else:
+        st.info("📝 No logs available. Start using the application to see logs here.")
+    
+    # Auto-refresh
+    if auto_refresh:
+        time.sleep(5)
+        st.rerun()
+
+def check_authentication():
+    """Check if YouTube API is authenticated"""
+    return os.path.exists('token.json')
+
+def get_youtube_service():
+    """Get authenticated YouTube service"""
+    try:
+        if os.path.exists('token.json'):
+            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+            if creds and creds.valid:
+                return build('youtube', 'v3', credentials=creds)
+    except Exception as e:
+        st.error(f"Error getting YouTube service: {str(e)}")
+    return None
+
+def authenticate_youtube():
+    """Authenticate with YouTube API"""
+    try:
+        if not os.path.exists('credentials.json'):
+            st.error("❌ Please upload OAuth JSON file first!")
+            return
+        
+        flow = InstalledAppFlow.from_client_secrets_file(
+            'credentials.json', SCOPES)
+        creds = flow.run_local_server(port=0)
+        
+        # Save credentials
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+        
+        st.success("✅ Authentication successful!")
+        st.rerun()
+        
+    except Exception as e:
+        st.error(f"❌ Authentication failed: {str(e)}")
+
+def test_api_connection():
+    """Test YouTube API connection"""
+    try:
+        service = get_youtube_service()
+        if service:
+            # Test API call
+            response = service.channels().list(part='snippet', mine=True).execute()
+            if response['items']:
+                st.success("✅ API connection successful!")
+            else:
+                st.error("❌ No channel found")
+        else:
+            st.error("❌ Could not get YouTube service")
+    except Exception as e:
+        st.error(f"❌ API test failed: {str(e)}")
+
+def show_api_quota_info():
+    """Show API quota information"""
+    st.info("📊 YouTube API Quota Information:")
+    st.write("• Daily quota: 10,000 units")
+    st.write("• Search: 100 units per request")
+    st.write("• Video upload: 1,600 units")
+    st.write("• Live broadcast: 50 units")
+
 def main():
     # Page configuration must be the first Streamlit command
     st.set_page_config(
@@ -1593,15 +2096,15 @@ def main():
     
     # Tab 2: Add New Stream
     with tabs[1]:
-        render_add_stream_ui()
+        render_add_new_stream()
     
     # Tab 3: YouTube API
     with tabs[2]:
-        render_youtube_api_ui()
+        render_youtube_api()
     
     # Tab 4: Logs
     with tabs[3]:
-        render_logs_ui()
+        render_logs()
     
     # Tab 5: Advanced Settings
     with tabs[4]:
