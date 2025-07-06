@@ -1584,6 +1584,25 @@ def main():
                 if imported_id:
                     st.success(f"✅ Session imported: {imported_id}")
     
+    # Create tabs
+    tabs = st.tabs(["🎬 Stream Manager", "➕ Add New Stream", "📺 YouTube API", "📊 Logs", "⚙️ Advanced Settings"])
+    
+    # Tab 1: Stream Manager
+    with tabs[0]:
+        render_stream_manager()
+    
+    # Tab 2: Add New Stream
+    with tabs[1]:
+        render_add_stream_ui()
+    
+    # Tab 3: YouTube API
+    with tabs[2]:
+        render_youtube_api_ui()
+    
+    # Tab 4: Logs
+    with tabs[3]:
+        render_logs_ui()
+    
     # Tab 5: Advanced Settings
     with tabs[4]:
         render_advanced_settings()
