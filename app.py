@@ -8,6 +8,13 @@ import streamlit.components.v1 as components
 from datetime import datetime, timedelta
 import urllib.parse
 import requests
+from advanced_settings import (
+    get_advanced_settings, 
+    render_advanced_settings,
+    apply_advanced_settings_to_broadcast,
+    get_advanced_ffmpeg_params,
+    send_stream_notification
+)
 import sqlite3
 from pathlib import Path
 
@@ -29,6 +36,199 @@ except ImportError:
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
     from google_auth_oauthlib.flow import Flow
+
+# Session management functions
+def get_session_manager():
+    """Get or create session manager"""
+    if 'session_manager' not in st.session_state:
+        st.session_state.session_manager = SessionManager()
+    return st.session_state.session_manager
+
+def restore_session():
+    """Restore session data from persistent storage"""
+    try:
+        session_manager = get_session_manager()
+        session_data = session_manager.get_current_session()
+        
+        if session_data:
+            # Restore YouTube service if available
+            if 'youtube_credentials' in session_data:
+                service = create_youtube_service(session_data['youtube_credentials'])
+                if service:
+                    st.session_state['youtube_service'] = service
+                    
+                    # Restore channel info
+                    if 'channel_info' in session_data:
+                        st.session_state['channel_info'] = session_data['channel_info']
+            
+            # Restore broadcast info
+            if 'live_broadcast_info' in session_data:
+                st.session_state['live_broadcast_info'] = session_data['live_broadcast_info']
+            
+            # Restore stream key
+            if 'current_stream_key' in session_data:
+                st.session_state['current_stream_key'] = session_data['current_stream_key']
+                
+    except Exception as e:
+        st.error(f"Error restoring session: {e}")
+
+def save_broadcast_to_session(broadcast_data):
+    """Save broadcast data to session"""
+    try:
+        session_manager = get_session_manager()
+        session_manager.save_broadcast_data(broadcast_data)
+        
+        # Also update session state for immediate use
+        st.session_state['live_broadcast_info'] = broadcast_data
+        if 'stream_key' in broadcast_data:
+            st.session_state['current_stream_key'] = broadcast_data['stream_key']
+            
+    except Exception as e:
+        st.error(f"Error saving broadcast to session: {e}")
+
+def clear_broadcast_from_session():
+    """Clear broadcast data from session"""
+    try:
+        session_manager = get_session_manager()
+        session_manager.clear_broadcast_data()
+        
+        # Clear from session state
+        if 'live_broadcast_info' in st.session_state:
+            del st.session_state['live_broadcast_info']
+        if 'current_stream_key' in st.session_state:
+            del st.session_state['current_stream_key']
+            
+    except Exception as e:
+        st.error(f"Error clearing broadcast from session: {e}")
+
+class SessionManager:
+    """Manage streaming sessions and persistent data"""
+    
+    def __init__(self):
+        self.session_file = Path("streaming_session.json")
+        self.ensure_session_file()
+    
+    def ensure_session_file(self):
+        """Ensure session file exists"""
+        if not self.session_file.exists():
+            self.session_file.write_text(json.dumps({}))
+    
+    def get_current_session(self):
+        """Get current session data"""
+        try:
+            with open(self.session_file, 'r') as f:
+                data = json.load(f)
+                return data.get('current_session', {})
+        except Exception as e:
+            st.error(f"Error reading session file: {e}")
+            return {}
+    
+    def save_session_data(self, key, value):
+        """Save data to current session"""
+        try:
+            with open(self.session_file, 'r') as f:
+                data = json.load(f)
+            
+            if 'current_session' not in data:
+                data['current_session'] = {}
+            
+            data['current_session'][key] = value
+            data['current_session']['last_updated'] = datetime.now().isoformat()
+            
+            with open(self.session_file, 'w') as f:
+                json.dump(data, f, indent=2)
+                
+        except Exception as e:
+            st.error(f"Error saving session data: {e}")
+    
+    def save_broadcast_data(self, broadcast_data):
+        """Save broadcast data to session"""
+        self.save_session_data('live_broadcast_info', broadcast_data)
+        if 'stream_key' in broadcast_data:
+            self.save_session_data('current_stream_key', broadcast_data['stream_key'])
+    
+    def clear_broadcast_data(self):
+        """Clear broadcast data from session"""
+        try:
+            with open(self.session_file, 'r') as f:
+                data = json.load(f)
+            
+            if 'current_session' in data:
+                data['current_session'].pop('live_broadcast_info', None)
+                data['current_session'].pop('current_stream_key', None)
+                data['current_session']['last_updated'] = datetime.now().isoformat()
+            
+            with open(self.session_file, 'w') as f:
+                json.dump(data, f, indent=2)
+                
+        except Exception as e:
+            st.error(f"Error clearing broadcast data: {e}")
+    
+    def get_session_info(self):
+        """Get session information"""
+        session_data = self.get_current_session()
+        return {
+            'has_youtube_auth': 'youtube_credentials' in session_data,
+            'has_broadcast': 'live_broadcast_info' in session_data,
+            'has_stream_key': 'current_stream_key' in session_data,
+            'last_updated': session_data.get('last_updated', 'Never')
+        }
+    
+    def cleanup_old_sessions(self, hours_old=24):
+        """Clean up old session data"""
+        try:
+            with open(self.session_file, 'r') as f:
+                data = json.load(f)
+            
+            current_time = datetime.now()
+            cleaned_count = 0
+            
+            # Clean old sessions (if we implement multiple sessions later)
+            if 'current_session' in data:
+                last_updated = data['current_session'].get('last_updated')
+                if last_updated:
+                    last_updated_dt = datetime.fromisoformat(last_updated)
+                    if (current_time - last_updated_dt).total_seconds() > hours_old * 3600:
+                        data['current_session'] = {}
+                        cleaned_count = 1
+            
+            with open(self.session_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            
+            return cleaned_count
+            
+        except Exception as e:
+            st.error(f"Error cleaning old sessions: {e}")
+            return 0
+    
+    def export_session(self):
+        """Export current session data"""
+        try:
+            session_data = self.get_current_session()
+            return json.dumps(session_data, indent=2)
+        except Exception as e:
+            st.error(f"Error exporting session: {e}")
+            return None
+    
+    def import_session(self, session_json):
+        """Import session data"""
+        try:
+            imported_data = json.loads(session_json)
+            
+            with open(self.session_file, 'r') as f:
+                data = json.load(f)
+            
+            data['current_session'] = imported_data
+            data['current_session']['last_updated'] = datetime.now().isoformat()
+            
+            with open(self.session_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            
+            return "imported_session"
+            
+        except Exception as e:
+            st.error(f"Error importing session: {e}")
+            return None
 
 # Initialize database for persistent logs
 def init_database():
@@ -651,6 +851,19 @@ def main():
         page_icon="📺",
         layout="wide"
     )
+    
+    # Initialize session manager dan restore data
+    # Initialize session manager and restore session
+    try:
+        session_manager = get_session_manager()
+        restore_session()
+    except Exception as e:
+        st.error(f"Session initialization error: {e}")
+        # Fallback to basic session state
+        session_manager = None
+    
+    session_manager = get_session_manager()
+    restore_session()
     
     # Initialize database
     init_database()
@@ -1333,5 +1546,47 @@ def main():
         else:
             st.info("No historical logs available.")
 
-if __name__ == '__main__':
+    # Session management footer
+    with st.expander("💾 Session Management", expanded=False):
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.subheader("📊 Session Info")
+            session_info = session_manager.get_session_info()
+            st.json(session_info)
+        
+        with col2:
+            st.subheader("🧹 Cleanup")
+            if st.button("🗑️ Clean Old Sessions"):
+                cleaned = session_manager.cleanup_old_sessions(24)
+                st.success(f"✅ Cleaned {cleaned} old sessions")
+            
+            if st.button("🔄 Clear Current Session"):
+                clear_broadcast_from_session()
+                st.success("✅ Current session cleared")
+        
+        with col3:
+            st.subheader("💾 Backup")
+            if st.button("📤 Export Session"):
+                export_data = session_manager.export_session()
+                if export_data:
+                    st.download_button(
+                        "💾 Download Session Backup",
+                        export_data,
+                        f"session_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        "application/json"
+                    )
+            
+            uploaded_session = st.file_uploader("📥 Import Session", type=['json'])
+            if uploaded_session:
+                session_json = uploaded_session.read().decode('utf-8')
+                imported_id = session_manager.import_session(session_json)
+                if imported_id:
+                    st.success(f"✅ Session imported: {imported_id}")
+    
+    # Tab 5: Advanced Settings
+    with tabs[4]:
+        render_advanced_settings()
+
+if __name__ == "__main__":
     main()
